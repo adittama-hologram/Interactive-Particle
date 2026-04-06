@@ -10,7 +10,6 @@ export class TrackerService {
   }
 
   async initialize() {
-    // We use the lite model for faster real-time performance on web
     const vision = await FilesetResolver.forVisionTasks(
       "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
     );
@@ -30,34 +29,49 @@ export class TrackerService {
     this.onResults = onResults;
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      alert("Camera API not available. Ensure you are on HTTPS or localhost.");
       throw new Error("Browser API navigator.mediaDevices.getUserMedia not available");
     }
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: 640, height: 480, facingMode: "user" }
-    });
-    
-    this.videoElement.srcObject = stream;
-    
-    return new Promise((resolve) => {
-      this.videoElement.onloadedmetadata = () => {
-        this.videoElement.play();
-        this.detectPose();
-        resolve();
-      };
-    });
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 1280, height: 720, facingMode: "user" }
+      });
+      this.videoElement.srcObject = stream;
+      
+      return new Promise((resolve) => {
+        this.videoElement.onloadeddata = () => {
+          this.videoElement.play().then(() => {
+            this.detectPose();
+            resolve();
+          }).catch(e => {
+            console.error("Video play failed:", e);
+            resolve();
+          });
+        };
+      });
+    } catch(err) {
+      alert("Failed to start camera: " + err.message);
+      throw err;
+    }
   }
 
   detectPose = () => {
     if (!this.videoElement || !this.poseLandmarker) return;
 
-    const startTimeMs = performance.now();
-    if (this.lastVideoTime !== this.videoElement.currentTime) {
-      this.lastVideoTime = this.videoElement.currentTime;
-      
-      const results = this.poseLandmarker.detectForVideo(this.videoElement, startTimeMs);
-      if (this.onResults && results) {
-        this.onResults(results);
+    if (this.videoElement.readyState >= 2) {
+      const startTimeMs = performance.now();
+      if (this.lastVideoTime !== this.videoElement.currentTime) {
+        this.lastVideoTime = this.videoElement.currentTime;
+        
+        try {
+            const results = this.poseLandmarker.detectForVideo(this.videoElement, startTimeMs);
+            if (this.onResults && results) {
+              this.onResults(results);
+            }
+        } catch(e) {
+            console.error("Pose detection error:", e);
+        }
       }
     }
     
