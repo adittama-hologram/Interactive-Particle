@@ -21,6 +21,7 @@ export class TrackerService {
       },
       runningMode: "VIDEO",
       numPoses: 1
+      // outputSegmentationMasks: true // COMMENTED OUT FOR PERFORMANCE TESTING
     });
   }
 
