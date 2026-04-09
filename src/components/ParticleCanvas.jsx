@@ -10,8 +10,19 @@ function ParticleCanvas() {
   const maskCanvasRef = useRef(null);
   const [isFrozen, setIsFrozen] = useState(false);
   const isFrozenRef = useRef(false);
-  const [showOverlay, setShowOverlay] = useState(true);
-  const showOverlayRef = useRef(true);
+  const [showOverlay, setShowOverlay] = useState(false);
+  const showOverlayRef = useRef(false);
+  const [isActionActive, setIsActionActive] = useState(false);
+  const isActionRef = useRef(false);
+  const actionAngleRef = useRef(0);
+
+  const triggerAction = () => {
+    if (isActionRef.current) return;
+    setIsActionActive(true);
+    isActionRef.current = true;
+    actionAngleRef.current = 0;
+    if (videoRef.current) videoRef.current.pause();
+  };
 
   const toggleFreeze = () => {
     setIsFrozen(prev => {
@@ -36,7 +47,7 @@ function ParticleCanvas() {
   useEffect(() => {
     let animationFrameId;
     let poseResults = null;
-    const PARTICLE_COUNT = 150; // Increased to 150 to support higher spawn volume
+    const PARTICLE_COUNT = 180; // Scaled down to 180 to preserve framerate!
 
     const GROUP_WALL = 1;
     const GROUP_PARTICLE = 2;
@@ -54,9 +65,26 @@ function ParticleCanvas() {
     // --- Three.js Setup ---
     const scene = new THREE.Scene();
 
+    // Create a gradient texture for environment mapping when the background is disabled
+    const gradientCanvas = document.createElement('canvas');
+    gradientCanvas.width = 512;
+    gradientCanvas.height = 512;
+    const gradientCtx = gradientCanvas.getContext('2d');
+    const gradient = gradientCtx.createLinearGradient(0, 0, 512, 512);
+    gradient.addColorStop(0, '#4158D0');
+    gradient.addColorStop(0.46, '#C850C0');
+    gradient.addColorStop(1, '#FFCC70');
+    gradientCtx.fillStyle = gradient;
+    gradientCtx.fillRect(0, 0, 512, 512);
+
+    const gradientTexture = new THREE.CanvasTexture(gradientCanvas);
+    gradientTexture.colorSpace = THREE.SRGBColorSpace;
+    gradientTexture.mapping = THREE.EquirectangularReflectionMapping;
+
     // Pass live webcam into WebGL environment mapping so glass materials actually refract real content
+    let videoTexture = null;
     if (videoRef.current) {
-      const videoTexture = new THREE.VideoTexture(videoRef.current);
+      videoTexture = new THREE.VideoTexture(videoRef.current);
       videoTexture.colorSpace = THREE.SRGBColorSpace;
       videoTexture.minFilter = THREE.LinearFilter;
       videoTexture.magFilter = THREE.LinearFilter;
@@ -77,7 +105,7 @@ function ParticleCanvas() {
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
     renderer.setSize(width, height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.setClearColor(0x000000, 1);
+    renderer.setClearColor(0x000000, 0);
 
     if (containerRef.current) {
       containerRef.current.innerHTML = '';
@@ -122,7 +150,23 @@ function ParticleCanvas() {
 
     const dX = wDist / 2;
     const dY = hDist / 2;
-    const dZ = 5;
+    const maxBound = Math.max(dX, dY);
+
+    // --- 3D Human Matrix Cutout ---
+    const maskTexture = new THREE.CanvasTexture(maskCanvasRef.current);
+    maskTexture.colorSpace = THREE.SRGBColorSpace;
+    maskTexture.minFilter = THREE.LinearFilter;
+
+    const maskPlaneMat = new THREE.MeshBasicMaterial({
+      map: maskTexture,
+      transparent: true,
+      alphaTest: 0.1,
+      side: THREE.DoubleSide
+    });
+    const maskPlane = new THREE.Mesh(new THREE.PlaneGeometry(wDist, hDist), maskPlaneMat);
+    // Mirror horizontally to match the webcam inversion
+    maskPlane.scale.x = -1;
+    scene.add(maskPlane);
 
     // --- Marching Cubes Setup (Metaballs) ---
     // Increased grid resolution up to 64 for incredibly high fidelity liquid rendering!
@@ -158,7 +202,7 @@ function ParticleCanvas() {
 
     const effect = new MarchingCubes(resolution, material, false, false, 100000);
     effect.position.set(0, 0, 0);
-    effect.scale.set(dX, dY, dZ);
+    effect.scale.set(maxBound, maxBound, maxBound);
     effect.isolation = 80;
     scene.add(effect);
 
@@ -183,11 +227,11 @@ function ParticleCanvas() {
         collisionFilterMask: GROUP_PARTICLE // Particles only collide statically with other particles now, walls are eliminated!
       });
 
-      body.blobStrength = randRad * 0.15; // Decreased base strength for smaller visual footprint
+      body.blobStrength = randRad * 0.08; // Decreased base strength for smaller visual footprint
       body.isActive = false;
       body.spawnTime = 0;
       body.lifeSpan = 0;
-      
+
       world.addBody(body);
       bodies.push(body);
     }
@@ -204,17 +248,48 @@ function ParticleCanvas() {
     window.addEventListener('resize', onResize);
 
     const timeStep = 1 / 60;
+    let lastTime = performance.now();
 
     const animate = () => {
       try {
-        if (!isFrozenRef.current) {
+        const now = performance.now();
+        const dt = now - lastTime;
+        lastTime = now;
+
+        if (!isFrozenRef.current && !isActionRef.current) {
           world.step(timeStep);
         }
 
-        /* -- COMMENTED OUT BLANKET OVERLAY OVERHEAD TESTING --
+        if (isActionRef.current) {
+          actionAngleRef.current += 0.01745; // 360 degrees (~6.28 rad) in ~360 frames (6 seconds at 60fps)
+          camera.position.x = Math.sin(actionAngleRef.current) * 30;
+          camera.position.z = Math.cos(actionAngleRef.current) * 30;
+          camera.lookAt(0, 0, 0);
+
+          if (actionAngleRef.current >= Math.PI * 2) {
+            isActionRef.current = false;
+            setIsActionActive(false);
+            camera.position.set(0, 0, 30);
+            camera.lookAt(0, 0, 0);
+            if (videoRef.current) videoRef.current.play().catch(e => console.error("Could not resume video:", e));
+          }
+        }
+
+        maskPlane.visible = showOverlayRef.current;
+
+        // Toggle scene background and environment based on mask
+        if (showOverlayRef.current) {
+          scene.background = null;
+          scene.environment = gradientTexture;
+        } else if (videoTexture) {
+          scene.background = videoTexture;
+          scene.environment = videoTexture;
+        }
+
+        // -- BLANKET OVERLAY --
         if (showOverlayRef.current && poseResults && poseResults.segmentationMasks && poseResults.segmentationMasks.length > 0) {
           const mask = poseResults.segmentationMasks[0];
-          
+
           if (maskCanvasRef.current) {
             const canvas = maskCanvasRef.current;
             if (canvas.width !== mask.width || canvas.height !== mask.height) {
@@ -223,29 +298,29 @@ function ParticleCanvas() {
             }
 
             const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+            if (videoRef.current && videoRef.current.readyState >= 2) {
+              ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+            }
+
             let imageData = ctx.getImageData(0, 0, mask.width, mask.height);
             const data = imageData.data;
             const maskFloat = mask.getAsFloat32Array();
             mask.close(); // Prevent canvas memory leak from MediaPipe mask object
 
             for (let j = 0; j < maskFloat.length; j++) {
-              if (maskFloat[j] > 0.1) {
-                data[j * 4] = 0;
-                data[j * 4 + 1] = 0;
-                data[j * 4 + 2] = 255;
-                data[j * 4 + 3] = 255; // Solid blue coverage
-              } else {
-                data[j * 4 + 3] = 0;
+              if (maskFloat[j] <= 0.1) {
+                data[j * 4 + 3] = 0; // Transparent where no body
               }
             }
 
             ctx.putImageData(imageData, 0, 0);
+            maskTexture.needsUpdate = true;
           }
         } else if (showOverlayRef.current && maskCanvasRef.current) {
           const ctx = maskCanvasRef.current.getContext('2d');
           ctx.clearRect(0, 0, maskCanvasRef.current.width, maskCanvasRef.current.height);
         }
-        */
 
         if (poseResults && poseResults.landmarks && poseResults.landmarks.length > 0) {
           const landmarks = poseResults.landmarks[0];
@@ -266,14 +341,14 @@ function ParticleCanvas() {
 
                 if (Math.abs(dx) > 0.001 || Math.abs(dy) > 0.001) {
                   const speed = Math.sqrt(dx * dx + dy * dy);
-                  
+
                   // Min 1.0 for noise bypass. Max 15.0 to ignore tracking camera "teleports" when hands enter/exit.
-                  if (speed > 1.0 && speed < 15.0 && !isFrozenRef.current) {
-                    
-                    // Massively scale the spawn rate linearly with the physical speed of the hand!
-                    // A slow wave (speed ~1.0) yields 1-2 particles. A fast whip (speed ~3.0+) yields 6 particles per frame!
-                    let spawnVolume = Math.min(Math.floor(speed * 2.0), 6) || 1;
-                    
+                  if (speed > 1.0 && speed < 15.0 && !isFrozenRef.current && !isActionRef.current) {
+
+                    // Scale the spawn rate linearly with the physical speed of the hand!
+                    // A slow wave yields ~1-2 particles. A fast whip yields up to 8 particles.
+                    let spawnVolume = Math.min(Math.floor(speed * 2.5), 8) || 1;
+
                     for (let s = 0; s < spawnVolume; s++) {
                       const inactiveBody = bodies.find(b => !b.isActive);
                       if (inactiveBody) {
@@ -281,17 +356,17 @@ function ParticleCanvas() {
                         inactiveBody.spawnTime = performance.now();
                         // Decay faster: 2-3 seconds lifespan
                         inactiveBody.lifeSpan = 2000 + Math.random() * 1000;
-                        
+
                         // Completely randomize the visual liquid injection size upon spawn
-                        inactiveBody.blobStrength = 0.04 + Math.random() * 0.15;
-                        
+                        inactiveBody.blobStrength = 0.02 + Math.random() * 0.08; // Decreased to make particles smaller
+
                         inactiveBody.position.set(
-                           currPos.x + (Math.random() - 0.5) * 1.5,
-                           currPos.y + (Math.random() - 0.5) * 1.5,
-                           0
+                          currPos.x + (Math.random() - 0.5) * 1.5,
+                          currPos.y + (Math.random() - 0.5) * 1.5,
+                          (Math.random() - 0.5) * 4.0 // Add 3D random Z depth spread
                         );
-                        
-                        inactiveBody.velocity.set(dx * 20, dy * 20, 0); 
+
+                        inactiveBody.velocity.set(dx * 20, dy * 20, (Math.random() - 0.5) * 15.0); // Add randomized Z velocity
                       }
                     }
                   }
@@ -309,39 +384,43 @@ function ParticleCanvas() {
         }
 
         effect.reset();
-        const now = performance.now();
         for (let i = 0; i < bodies.length; i++) {
           const b = bodies[i];
 
+          if (isFrozenRef.current || isActionRef.current) {
+            b.spawnTime += dt;
+          }
+
           if (!b.isActive) {
-             b.position.set(0, 0, -1000);
-             b.velocity.set(0, 0, 0);
-             continue; // Skip inactive pool members
+            b.position.set(0, 0, -1000);
+            b.velocity.set(0, 0, 0);
+            continue; // Skip inactive pool members
           }
 
           if (now - b.spawnTime > b.lifeSpan) {
-             b.isActive = false;
-             continue; // Immediately suspend
+            b.isActive = false;
+            continue; // Immediately suspend
           }
 
-          // Absolutely lock depth to 0 
-          b.position.z = 0;
-          b.velocity.z = 0;
+          // Instead of absolutely locking depth to 0 (which makes them flat 2D), 
+          // add a gentle 3D spring towards Z=0 so they clump thickly but remain volumetric!
+          b.velocity.z -= b.position.z * 0.1;
+          b.velocity.z *= 0.9;
           // After spawning, the object relies entirely on its inherited velocity and standard Cannon physics.
           // Removed manual randomized Brownian forces to preserve clean trajectories.
 
-          const nx = (b.position.x / (dX * 2)) + 0.5;
-          const ny = (b.position.y / (dY * 2)) + 0.5;
-          const nz = (b.position.z / (dZ * 2)) + 0.5;
+          const nx = (b.position.x / (maxBound * 2)) + 0.5;
+          const ny = (b.position.y / (maxBound * 2)) + 0.5;
+          const nz = (b.position.z / (maxBound * 2)) + 0.5;
 
           if (nx > 0 && nx < 1 && ny > 0 && ny < 1 && nz > 0 && nz < 1) {
-             // Smoothly shrink geometry before despawn
-             const ageRatio = (now - b.spawnTime) / b.lifeSpan;
-             let strength = b.blobStrength;
-             if (ageRatio > 0.8) {
-                strength *= (1.0 - ageRatio) / 0.2; // Linear zero scale out
-             }
-             effect.addBall(nx, ny, nz, strength, 12);
+            // Smoothly shrink geometry before despawn
+            const ageRatio = (now - b.spawnTime) / b.lifeSpan;
+            let strength = b.blobStrength;
+            if (ageRatio > 0.8) {
+              strength *= (1.0 - ageRatio) / 0.2; // Linear zero scale out
+            }
+            effect.addBall(nx, ny, nz, strength, 12);
           }
         }
         effect.update();
@@ -366,22 +445,13 @@ function ParticleCanvas() {
   }, []);
 
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%' }}>
+    <div style={{ position: 'relative', width: '100%', height: '100%', background: 'linear-gradient(45deg, #4158D0 0%, #C850C0 46%, #FFCC70 100%)' }}>
       {/* Hide video element fully so WebGL is the sole display */}
       <video ref={videoRef} style={{ display: 'none' }} playsInline autoPlay muted />
       <div ref={containerRef} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', cursor: 'default', touchAction: 'none' }} />
-      <canvas 
-        ref={maskCanvasRef} 
-        style={{ 
-          position: 'absolute', 
-          top: 0, 
-          left: 0, 
-          width: '100%', 
-          height: '100%', 
-          pointerEvents: 'none', 
-          objectFit: 'cover', // Mirror the full coverage of the webcam
-          transform: 'scaleX(-1)' // Mirror to match WebGL 3D texture
-        }} 
+      <canvas
+        ref={maskCanvasRef}
+        style={{ display: 'none' }}
       />
       <div style={{
         position: 'absolute',
@@ -431,6 +501,27 @@ function ParticleCanvas() {
           onPointerDown={(e) => e.stopPropagation()}
         >
           {isFrozen ? 'Unfreeze' : 'Freeze'}
+        </button>
+        <button
+          onClick={triggerAction}
+          disabled={isActionActive}
+          style={{
+            padding: '12px 24px',
+            fontSize: '16px',
+            fontWeight: 'bold',
+            color: '#fff',
+            backgroundColor: isActionActive ? '#95a5a6' : '#f39c12',
+            border: 'none',
+            borderRadius: '25px',
+            cursor: isActionActive ? 'not-allowed' : 'pointer',
+            boxShadow: '0 4px 6px rgba(0, 0, 0, 0.3)',
+            transition: 'background-color 0.3s ease',
+            textTransform: 'uppercase',
+            letterSpacing: '1px'
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          {isActionActive ? 'Action...' : 'Action!'}
         </button>
       </div>
     </div>

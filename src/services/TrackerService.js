@@ -20,8 +20,8 @@ export class TrackerService {
         delegate: "GPU"
       },
       runningMode: "VIDEO",
-      numPoses: 1
-      // outputSegmentationMasks: true // COMMENTED OUT FOR PERFORMANCE TESTING
+      numPoses: 1,
+      outputSegmentationMasks: true
     });
   }
 
